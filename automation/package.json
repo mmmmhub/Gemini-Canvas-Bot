@@ -1,0 +1,14 @@
+{
+  "name": "gemini-canvas-automation",
+  "version": "1.0.0",
+  "description": "Playwright automation for Gemini Canvas shared links",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "install-browsers": "npx playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "^1.44.0",
+    "dotenv": "^16.4.5"
+  }
+}

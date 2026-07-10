@@ -1,0 +1,72 @@
+[
+  {
+    "name": "__Secure-1PSID",
+    "value": "YOUR_COOKIE_VALUE_HERE",
+    "domain": ".google.com",
+    "path": "/",
+    "expires": -1,
+    "httpOnly": true,
+    "secure": true,
+    "sameSite": "None"
+  },
+  {
+    "name": "__Secure-1PAPISID",
+    "value": "YOUR_COOKIE_VALUE_HERE",
+    "domain": ".google.com",
+    "path": "/",
+    "expires": -1,
+    "httpOnly": false,
+    "secure": true,
+    "sameSite": "None"
+  },
+  {
+    "name": "SID",
+    "value": "YOUR_COOKIE_VALUE_HERE",
+    "domain": ".google.com",
+    "path": "/",
+    "expires": -1,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "HSID",
+    "value": "YOUR_COOKIE_VALUE_HERE",
+    "domain": ".google.com",
+    "path": "/",
+    "expires": -1,
+    "httpOnly": true,
+    "secure": false,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "SSID",
+    "value": "YOUR_COOKIE_VALUE_HERE",
+    "domain": ".google.com",
+    "path": "/",
+    "expires": -1,
+    "httpOnly": true,
+    "secure": true,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "APISID",
+    "value": "YOUR_COOKIE_VALUE_HERE",
+    "domain": ".google.com",
+    "path": "/",
+    "expires": -1,
+    "httpOnly": false,
+    "secure": false,
+    "sameSite": "Lax"
+  },
+  {
+    "name": "SAPISID",
+    "value": "YOUR_COOKIE_VALUE_HERE",
+    "domain": ".google.com",
+    "path": "/",
+    "expires": -1,
+    "httpOnly": false,
+    "secure": true,
+    "sameSite": "None"
+  }
+]

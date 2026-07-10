@@ -1,0 +1,15 @@
+# Secrets – never commit these
+.env
+cookies.json
+
+# User-provided input image
+input.jpg
+
+# Generated output
+output/
+
+# Node modules
+node_modules/
+
+# Playwright browser cache (if stored inside the automation folder)
+.cache/
