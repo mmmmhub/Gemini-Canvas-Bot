@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Gemini Canvas — AI Image Generator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-logo">
+        <svg class="logo-icon" width="32" height="32" viewBox="0 0 32 32" fill="none">
+          <rect width="32" height="32" rx="9" fill="url(#lg)"/>
+          <path d="M10 22L16 10L22 22M12.5 18H19.5" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          <defs>
+            <linearGradient id="lg" x1="0" y1="0" x2="32" y2="32">
+              <stop stop-color="#818cf8"/>
+              <stop offset="1" stop-color="#a78bfa"/>
+            </linearGradient>
+          </defs>
+        </svg>
+        <div>
+          <div class="header-title">Gemini Canvas</div>
+          <div class="header-sub">AI Image Generator</div>
+        </div>
+      </div>
+      <div class="header-badge">
+        <span class="badge-dot" id="serverDot"></span>
+        <span class="badge-label" id="serverLabel">Connecting…</span>
+      </div>
+    </header>
+
+    <main class="main">
+      <!-- Generate Card -->
+      <section class="card" id="generateCard">
+        <div class="card-header">
+          <h1 class="card-title">Generate an Image</h1>
+          <p class="card-desc">
+            Describe your image in any language. Arabic and English both work perfectly.
+          </p>
+        </div>
+
+        <div class="form">
+          <div class="field">
+            <label class="label" for="promptInput">Prompt</label>
+            <textarea
+              id="promptInput"
+              class="textarea"
+              placeholder="مدينة مستقبلية في الفضاء الخارجي  ·  A futuristic city floating in outer space…"
+              rows="4"
+              spellcheck="false"
+            ></textarea>
+          </div>
+
+          <div class="form-row">
+            <div class="field field-count">
+              <label class="label" for="countInput">Image Count</label>
+              <input
+                id="countInput"
+                class="input"
+                type="number"
+                min="1"
+                value="1"
+                placeholder="1"
+              />
+            </div>
+            <button class="btn-generate" id="generateBtn" type="button">
+              <svg width="18" height="18" viewBox="0 0 18 18" fill="none" aria-hidden="true">
+                <path d="M9 1.5L11.5 7H16.5L12.5 10.5L14 16L9 13L4 16L5.5 10.5L1.5 7H6.5L9 1.5Z"
+                  stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" fill="none"/>
+              </svg>
+              <span id="btnLabel">Generate</span>
+            </button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Status Card (hidden until job is submitted) -->
+      <section class="card card-status" id="statusCard" hidden>
+        <div class="status-row" id="statusRow">
+          <div class="status-icon" id="statusIcon"></div>
+          <div class="status-text">
+            <p class="status-label" id="statusLabel">Submitting…</p>
+            <p class="status-desc"  id="statusDesc">Your request is on its way.</p>
+          </div>
+        </div>
+
+        <div class="progress-track">
+          <div class="progress-fill" id="progressFill" style="width:0%"></div>
+        </div>
+
+        <div class="meta-row" id="metaRow"></div>
+
+        <!-- Result image (shown on completion) -->
+        <div class="result" id="result" hidden>
+          <div class="result-img-wrap">
+            <img id="resultImg" class="result-img" src="" alt="AI-generated image" />
+          </div>
+          <a id="downloadBtn" class="btn-download" download="gemini-canvas.png">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="M8 2V10M8 10L5 7M8 10L11 7" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M2 13H14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/>
+            </svg>
+            Download Image
+          </a>
+        </div>
+      </section>
+
+      <!-- Queue hint -->
+      <p class="queue-hint" id="queueHint" hidden>
+        <svg width="13" height="13" viewBox="0 0 13 13" fill="none" aria-hidden="true">
+          <circle cx="6.5" cy="6.5" r="5.5" stroke="currentColor" stroke-width="1.3"/>
+          <path d="M6.5 3.5V6.5L8.5 8.5" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+        </svg>
+        Up to <strong>3 images generate simultaneously</strong>. Requests beyond that wait in queue automatically.
+      </p>
+    </main>
+  </div>
+
+  <script>
+    // Embed base path so app.js doesn't need to hard-code it
+    window.APP_BASE = '/canvas-app';
+  </script>
+  <script src="app.js"></script>
+</body>
+</html>

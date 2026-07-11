@@ -1,0 +1,27 @@
+kind = "web"
+previewPath = "/canvas-app/"
+title = "Gemini Canvas UI"
+version = "1.0.0"
+id = "artifacts/canvas-app"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/canvas-app/" ]
+localPort = 18724
+
+[services.development]
+run = "pnpm --filter @workspace/canvas-app run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/canvas-app", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/canvas-app/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "18724"
+BASE_PATH = "/canvas-app/"

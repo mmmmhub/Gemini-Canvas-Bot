@@ -1,0 +1,3 @@
+- [Canvas App Architecture](canvas-app-arch.md) — full-stack Express + Playwright app lives at artifacts/canvas-app; NOT Vite/React despite react-vite scaffold origin.
+- [Chromium Path](chromium-path.md) — Nix-store Chromium must be used; Playwright's bundled headless shell fails with missing libglib.
+- [Cookie Normalisation](cookie-normalisation.md) — cookies.json uses non-standard sameSite values that must be mapped before Playwright injection.

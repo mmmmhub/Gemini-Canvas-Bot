@@ -1,0 +1,17 @@
+{
+  "name": "@workspace/canvas-app",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Gemini Canvas Text-to-Image Web Application",
+  "main": "server.js",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js",
+    "build": "echo 'No build step required'"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "playwright": "^1.44.0",
+    "uuid": "^9.0.1"
+  }
+}
