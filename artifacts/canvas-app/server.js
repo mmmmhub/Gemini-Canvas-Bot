@@ -9,6 +9,7 @@
  */
 
 const express  = require('express');
+const cors     = require('cors');
 const path     = require('path');
 const fs       = require('fs');
 const { chromium } = require('playwright');
@@ -487,6 +488,7 @@ const jobQueue = new ConcurrentQueue(CONCURRENCY, processJob);
 
 // ─── Express App ───────────────────────────────────────────────────────────────
 const app = express();
+app.use(cors());
 app.use(express.json());
 
 // Serve public/ as static files under BASE prefix
