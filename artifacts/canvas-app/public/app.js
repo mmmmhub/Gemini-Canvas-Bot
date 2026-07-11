@@ -1,215 +1,205 @@
 'use strict';
 
-// ─── Constants ────────────────────────────────────────────────────────────────
-const BASE          = window.APP_BASE || '/canvas-app';
-const POLL_MS       = 3000;   // polling interval
-const PROGRESS_MAX  = 90;     // max % while still processing
+const BASE     = window.APP_BASE || '/canvas-app';
+const POLL_MS  = 3000;
+const MAX_PROG = 88; // cap while still processing
 
-// ─── DOM ──────────────────────────────────────────────────────────────────────
+// ── DOM refs ────────────────────────────────────────────────────
 const promptInput = document.getElementById('promptInput');
 const countInput  = document.getElementById('countInput');
 const generateBtn = document.getElementById('generateBtn');
-const btnLabel    = document.getElementById('btnLabel');
+const btnText     = document.getElementById('btnText');
+
 const statusCard  = document.getElementById('statusCard');
-const statusRow   = document.getElementById('statusRow');
-const statusIcon  = document.getElementById('statusIcon');
-const statusLabel = document.getElementById('statusLabel');
-const statusDesc  = document.getElementById('statusDesc');
+const jobIcon     = document.getElementById('jobIcon');
+const jobTitle    = document.getElementById('jobTitle');
+const jobDesc     = document.getElementById('jobDesc');
 const progressFill= document.getElementById('progressFill');
-const metaRow     = document.getElementById('metaRow');
-const result      = document.getElementById('result');
+const jobMeta     = document.getElementById('jobMeta');
+
+const resultCard  = document.getElementById('resultCard');
 const resultImg   = document.getElementById('resultImg');
 const downloadBtn = document.getElementById('downloadBtn');
-const queueHint   = document.getElementById('queueHint');
+
 const serverDot   = document.getElementById('serverDot');
-const serverLabel = document.getElementById('serverLabel');
+const serverText  = document.getElementById('serverText');
 
-// ─── State ────────────────────────────────────────────────────────────────────
-let pollTimer    = null;
-let progTimer    = null;
-let progressPct  = 0;
+// ── State ────────────────────────────────────────────────────────
+let pollTimer   = null;
+let progTimer   = null;
+let currentPct  = 0;
 
-// ─── Server Status Ping ───────────────────────────────────────────────────────
-async function pingServer() {
+// ── Server health ping ───────────────────────────────────────────
+async function ping() {
   try {
     const r = await fetch(`${BASE}/api/health`);
     if (r.ok) {
-      serverDot.className   = 'badge-dot online';
-      serverLabel.textContent = 'Ready';
-    } else throw new Error();
+      serverDot.className  = 'status-dot ready';
+      serverText.textContent = 'Ready';
+    } else throw 0;
   } catch {
-    serverDot.className     = 'badge-dot offline';
-    serverLabel.textContent = 'Offline';
+    serverDot.className  = 'status-dot offline';
+    serverText.textContent = 'Offline';
   }
 }
-pingServer();
-setInterval(pingServer, 30_000);
+ping();
+setInterval(ping, 30_000);
 
-// ─── Progress Helpers ─────────────────────────────────────────────────────────
+// ── Progress helpers ─────────────────────────────────────────────
 function setProgress(pct) {
-  progressPct = Math.min(100, Math.max(0, pct));
-  progressFill.style.width = progressPct + '%';
+  currentPct = Math.min(100, Math.max(0, pct));
+  progressFill.style.width = currentPct + '%';
 }
 
-function animateProgressTo(target, durationMs) {
+function animateTo(target, ms) {
   clearInterval(progTimer);
-  const start = progressPct;
-  const delta = target - start;
+  const start = currentPct;
   const steps = 40;
-  const msPerStep = durationMs / steps;
   let i = 0;
   progTimer = setInterval(() => {
     i++;
-    setProgress(start + delta * (i / steps));
+    setProgress(start + (target - start) * (i / steps));
     if (i >= steps) clearInterval(progTimer);
-  }, msPerStep);
+  }, ms / steps);
 }
 
-function stopAll() {
+function stopTimers() {
   clearTimeout(pollTimer);
   clearInterval(progTimer);
 }
 
-// ─── UI Helpers ───────────────────────────────────────────────────────────────
-function elapsed(fromMs) {
-  const s = Math.round((Date.now() - fromMs) / 1000);
-  return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m ${s % 60}s`;
-}
-
-function showStatusCard() {
-  statusCard.hidden = false;
-  queueHint.hidden  = false;
-}
-
-function applyVariant(variant) {
-  statusCard.className = `card card-status state-${variant}`;
-}
-
-function renderMeta(ticket) {
-  const chips = [
-    `#${ticket.ticketId.slice(0, 8)}`,
-    `${ticket.imageCount || 1} image${(ticket.imageCount || 1) > 1 ? 's' : ''}`,
-  ];
-  if (ticket.startedAt) chips.push(`running ${elapsed(ticket.startedAt)}`);
-  metaRow.innerHTML = chips.map(c => `<span class="meta-chip">${c}</span>`).join('');
-}
-
-// Icon SVG templates
-const ICONS = {
+// ── Icon markup ──────────────────────────────────────────────────
+const ICON = {
   queued:
-    `<svg width="19" height="19" viewBox="0 0 19 19" fill="none"><circle cx="9.5" cy="9.5" r="7.5" stroke="currentColor" stroke-width="1.55"/><path d="M9.5 5.5V9.5L12 12" stroke="currentColor" stroke-width="1.55" stroke-linecap="round"/></svg>`,
-  processing:
-    `<div class="spinner"></div>`,
+    `<svg width="17" height="17" viewBox="0 0 17 17" fill="none">
+       <circle cx="8.5" cy="8.5" r="6.5" stroke="currentColor" stroke-width="1.5"/>
+       <path d="M8.5 5V8.5L11 11" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+     </svg>`,
+  processing: `<div class="spinner"></div>`,
   completed:
-    `<svg width="19" height="19" viewBox="0 0 19 19" fill="none"><circle cx="9.5" cy="9.5" r="7.5" stroke="currentColor" stroke-width="1.55"/><path d="M6 9.5L8.5 12L13 7" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+    `<svg width="17" height="17" viewBox="0 0 17 17" fill="none">
+       <circle cx="8.5" cy="8.5" r="6.5" stroke="currentColor" stroke-width="1.5"/>
+       <path d="M5.5 8.5L7.5 10.5L11.5 6.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+     </svg>`,
   failed:
-    `<svg width="19" height="19" viewBox="0 0 19 19" fill="none"><circle cx="9.5" cy="9.5" r="7.5" stroke="currentColor" stroke-width="1.55"/><path d="M7 12L12 7M12 12L7 7" stroke="currentColor" stroke-width="1.55" stroke-linecap="round"/></svg>`,
+    `<svg width="17" height="17" viewBox="0 0 17 17" fill="none">
+       <circle cx="8.5" cy="8.5" r="6.5" stroke="currentColor" stroke-width="1.5"/>
+       <path d="M6 11L11 6M11 11L6 6" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+     </svg>`,
 };
 
-// ─── Poll ─────────────────────────────────────────────────────────────────────
+function setVariant(v) {
+  statusCard.className = `card card-status state-${v}`;
+}
+
+// ── Meta chips ───────────────────────────────────────────────────
+function renderMeta(ticket) {
+  const chips = [`#${ticket.ticketId.slice(0, 8)}`];
+  if (ticket.imageCount) chips.push(`${ticket.imageCount} image${ticket.imageCount > 1 ? 's' : ''}`);
+  if (ticket.status === 'queued' && ticket.position)
+    chips.push(`queue pos ${ticket.position}`);
+  if (ticket.startedAt)
+    chips.push(`${Math.round((Date.now() - ticket.startedAt) / 1000)}s elapsed`);
+  jobMeta.innerHTML = chips.map(c => `<span class="meta-chip">${c}</span>`).join('');
+}
+
+// ── Polling ──────────────────────────────────────────────────────
 async function poll(ticketId) {
   let data;
   try {
     const r = await fetch(`${BASE}/api/status/${ticketId}`);
     data = await r.json();
   } catch {
-    // Network hiccup — retry soon
     pollTimer = setTimeout(() => poll(ticketId), POLL_MS * 2);
     return;
   }
 
   renderMeta(data);
 
-  switch (data.status) {
-    case 'queued': {
-      const pos = data.position || 1;
-      applyVariant('queued');
-      statusIcon.innerHTML  = ICONS.queued;
-      statusLabel.textContent = pos === 1 ? 'Next in queue' : `Position ${pos} in queue`;
-      statusDesc.textContent  = `Waiting for a worker slot. Up to ${CONCURRENCY} jobs run simultaneously.`;
-      queueHint.hidden = false;
-      animateProgressTo(12, 800);
-      pollTimer = setTimeout(() => poll(ticketId), POLL_MS);
-      break;
-    }
-
-    case 'processing': {
-      applyVariant('processing');
-      statusIcon.innerHTML  = ICONS.processing;
-      statusLabel.textContent = 'Generating your image…';
-      statusDesc.textContent  = 'Gemini Canvas is working on it. This usually takes 30–120 seconds.';
-      animateProgressTo(PROGRESS_MAX, 100_000);
-      pollTimer = setTimeout(() => poll(ticketId), POLL_MS);
-      break;
-    }
-
-    case 'completed': {
-      stopAll();
-      setProgress(100);
-      applyVariant('completed');
-      statusIcon.innerHTML  = ICONS.completed;
-      statusLabel.textContent = '✨ Image generated!';
-      const dur = data.completedAt && data.startedAt
-        ? `Completed in ${Math.round((data.completedAt - data.startedAt) / 1000)}s.`
-        : 'Your image is ready.';
-      statusDesc.textContent = dur;
-      queueHint.hidden = true;
-
-      result.hidden     = false;
-      resultImg.src     = data.imageUrl;
-      downloadBtn.href  = data.imageUrl;
-
-      generateBtn.disabled = false;
-      btnLabel.textContent = 'Generate Another';
-      break;
-    }
-
-    case 'failed': {
-      stopAll();
-      setProgress(0);
-      applyVariant('failed');
-      statusIcon.innerHTML  = ICONS.failed;
-      statusLabel.textContent = 'Generation failed';
-      statusDesc.textContent  = data.error || 'An unexpected error occurred. Please try again.';
-      queueHint.hidden = true;
-      generateBtn.disabled = false;
-      btnLabel.textContent = 'Try Again';
-      break;
-    }
-
-    default:
-      pollTimer = setTimeout(() => poll(ticketId), POLL_MS);
+  if (data.status === 'queued') {
+    setVariant('queued');
+    jobIcon.innerHTML  = ICON.queued;
+    const pos = data.position || 1;
+    jobTitle.textContent = pos === 1 ? 'Next in queue' : `Queue position ${pos}`;
+    jobDesc.textContent  = 'Waiting for an available worker (max 3 run simultaneously).';
+    animateTo(10, 600);
+    pollTimer = setTimeout(() => poll(ticketId), POLL_MS);
+    return;
   }
+
+  if (data.status === 'processing') {
+    setVariant('processing');
+    jobIcon.innerHTML  = ICON.processing;
+    jobTitle.textContent = 'Generating…';
+    jobDesc.textContent  = 'Gemini Canvas is working on your image. This usually takes 30–120 seconds.';
+    animateTo(MAX_PROG, 100_000);
+    pollTimer = setTimeout(() => poll(ticketId), POLL_MS);
+    return;
+  }
+
+  if (data.status === 'completed') {
+    stopTimers();
+    setProgress(100);
+    setVariant('completed');
+    jobIcon.innerHTML  = ICON.completed;
+    const secs = data.completedAt && data.startedAt
+      ? Math.round((data.completedAt - data.startedAt) / 1000) : null;
+    jobTitle.textContent = 'Image ready!';
+    jobDesc.textContent  = secs ? `Completed in ${secs}s.` : 'Your image has been generated.';
+
+    // Show result card
+    resultImg.src        = data.imageUrl;
+    downloadBtn.href     = data.imageUrl;
+    resultCard.hidden    = false;
+
+    generateBtn.disabled = false;
+    btnText.textContent  = 'Generate Another';
+    return;
+  }
+
+  if (data.status === 'failed') {
+    stopTimers();
+    setProgress(0);
+    setVariant('failed');
+    jobIcon.innerHTML    = ICON.failed;
+    jobTitle.textContent = 'Generation failed';
+    jobDesc.textContent  = data.error || 'An unexpected error occurred. Please try again.';
+    generateBtn.disabled = false;
+    btnText.textContent  = 'Try Again';
+    return;
+  }
+
+  pollTimer = setTimeout(() => poll(ticketId), POLL_MS);
 }
 
-const CONCURRENCY = 3;
-
-// ─── Generate ─────────────────────────────────────────────────────────────────
+// ── Generate ─────────────────────────────────────────────────────
 generateBtn.addEventListener('click', async () => {
   const prompt = promptInput.value.trim();
   if (!prompt) {
     promptInput.focus();
-    promptInput.style.outline = '2px solid var(--red)';
-    setTimeout(() => (promptInput.style.outline = ''), 1800);
+    promptInput.style.borderColor = 'var(--red)';
+    setTimeout(() => (promptInput.style.borderColor = ''), 1800);
     return;
   }
 
   const count = Math.max(1, parseInt(countInput.value, 10) || 1);
 
-  // Reset state
-  stopAll();
-  generateBtn.disabled = true;
-  btnLabel.textContent = 'Submitting…';
-  result.hidden        = true;
-  resultImg.src        = '';
-  metaRow.innerHTML    = '';
+  stopTimers();
+  generateBtn.disabled  = true;
+  btnText.textContent   = 'Submitting…';
+
+  // Reset UI
+  resultCard.hidden     = true;
+  resultImg.src         = '';
+  jobMeta.innerHTML     = '';
   setProgress(0);
 
-  showStatusCard();
-  applyVariant('queued');
-  statusIcon.innerHTML    = ICONS.queued;
-  statusLabel.textContent = 'Submitting request…';
-  statusDesc.textContent  = 'Connecting to server…';
+  // Show status card immediately
+  statusCard.hidden     = false;
+  setVariant('queued');
+  jobIcon.innerHTML     = ICON.queued;
+  jobTitle.textContent  = 'Submitting request…';
+  jobDesc.textContent   = 'Connecting to server…';
 
   let data;
   try {
@@ -221,20 +211,19 @@ generateBtn.addEventListener('click', async () => {
     data = await res.json();
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
   } catch (err) {
-    stopAll();
-    applyVariant('failed');
-    statusIcon.innerHTML    = ICONS.failed;
-    statusLabel.textContent = 'Could not submit request';
-    statusDesc.textContent  = err.message;
+    stopTimers();
+    setVariant('failed');
+    jobIcon.innerHTML    = ICON.failed;
+    jobTitle.textContent = 'Could not submit request';
+    jobDesc.textContent  = err.message;
     generateBtn.disabled = false;
-    btnLabel.textContent = 'Try Again';
+    btnText.textContent  = 'Try Again';
     return;
   }
 
-  btnLabel.textContent = 'Generating…';
-  animateProgressTo(8, 500);
+  btnText.textContent = 'Generating…';
+  animateTo(8, 400);
   poll(data.ticketId);
 });
 
-// Clear red outline when user types
-promptInput.addEventListener('input', () => { promptInput.style.outline = ''; });
+promptInput.addEventListener('input', () => (promptInput.style.borderColor = ''));

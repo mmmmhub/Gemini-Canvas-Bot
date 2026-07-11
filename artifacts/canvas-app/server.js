@@ -21,8 +21,8 @@ const BASE         = (process.env.BASE_PATH || '/canvas-app/').replace(/\/$/, ''
 const COOKIES_PATH = path.join(__dirname, '..', '..', 'cookies.json');
 const PUBLIC_DIR   = path.join(__dirname, 'public');
 const GEN_DIR      = path.join(PUBLIC_DIR, 'generated');
-const TARGET_URL   = 'https://share.gemini.google/EIt5nvt7wCXV';
-const CANVAS_WAIT  = 9000;   // ms for the Canvas React app to fully boot
+const TARGET_URL   = 'https://gemini.google.com/share/208acf6ff84b?skid=37f8c433-6d51-4e61-bf86-1505680055e2';
+const CANVAS_WAIT  = 2000;   // brief settle after iframe appears
 const GEN_TIMEOUT  = 180000; // ms for generation
 const CONCURRENCY  = 3;
 const TICKET_TTL   = 2 * 60 * 60 * 1000; // 2 hours
@@ -445,10 +445,12 @@ async function processJob(ticket) {
     page.on('pageerror', e => log('page-err', e.message.slice(0, 80)));
 
     log('job', `[${id.slice(0, 8)}] Navigating…`);
-    await page.goto(TARGET_URL, { waitUntil: 'networkidle', timeout: 60_000 });
+    await page.goto(TARGET_URL, { waitUntil: 'domcontentloaded', timeout: 60_000 });
     log('job', `[${id.slice(0, 8)}] Title: "${await page.title()}"`);
 
-    log('job', `[${id.slice(0, 8)}] Waiting ${CANVAS_WAIT / 1000}s for Canvas to boot…`);
+    log('job', `[${id.slice(0, 8)}] Waiting for Canvas iframe to appear…`);
+    await page.waitForSelector('iframe', { timeout: 30_000 });
+    log('job', `[${id.slice(0, 8)}] Iframe detected — settling ${CANVAS_WAIT / 1000}s…`);
     await sleep(CANVAS_WAIT);
 
     const frame = await findCanvasFrame(page);
