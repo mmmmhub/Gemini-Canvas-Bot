@@ -1,846 +1,503 @@
 /**
- * Gemini Canvas Automation Script
- * ─────────────────────────────────────────────────────────────────────────────
- * Automates the Gemini Canvas shared-link UI (NOT the standard Gemini chat).
- * The canvas renders a React app inside a sandboxed iframe; all interactions
- * happen inside that iframe context.
- *
- * Usage:
- *   1. Copy .env.example → .env  and fill in your values
- *   2. Export your Google cookies to cookies.json  (see cookies.example.json)
- *   3. Place your source image at the path set in IMAGE_PATH (default ./input.jpg)
- *   4. cd automation && node index.js
- *
- * Environment variables (all optional – sensible defaults provided):
- *   TARGET_URL          Gemini Canvas shared URL
- *   IMAGE_PATH          Path to the image to upload
- *   PROMPT              Generation prompt text (Arabic or any language)
- *   OUTPUT_COUNT        Number of output images (numeric, default 1)
- *   OUTPUT_DIR          Directory to write result images (default ./output)
- *   COOKIE_STRING       Raw Cookie: header string (alternative to cookies.json)
- *   HEADLESS            "false" to show the browser window
- *   PROCESS_TIMEOUT_MS  Max ms to wait for the download button (default 120000)
+ * Gemini Canvas – Text-to-Image Automation
+ * Reads cookies from /root cookies.json, navigates the Canvas iframe,
+ * types the prompt, sets count, generates, downloads the result, screenshots.
  */
-
 'use strict';
 
 const { chromium } = require('playwright');
 const fs   = require('fs');
 const path = require('path');
 
-// ── Load .env if present ────────────────────────────────────────────────────
-const envPath = path.join(__dirname, '.env');
-if (fs.existsSync(envPath)) {
-  require('dotenv').config({ path: envPath });
-} else {
-  // Try parent directory .env as fallback
-  const parentEnv = path.join(__dirname, '..', '.env');
-  if (fs.existsSync(parentEnv)) require('dotenv').config({ path: parentEnv });
+// ─── Config ──────────────────────────────────────────────────────────────────
+const COOKIES_PATH  = path.join(__dirname, '..', 'cookies.json');   // root cookies.json
+const OUTPUT_DIR    = path.join(__dirname, 'output');
+const TARGET_URL    = 'https://share.gemini.google/EIt5nvt7wCXV';
+const PROMPT        = 'مدينة مستقبلية في الفضاء الخارجي';
+const IMAGE_COUNT   = 1;
+const CANVAS_WAIT   = 9000;   // ms to wait for Canvas React app to fully boot
+const GEN_TIMEOUT   = 180000; // ms to wait for generation to finish
+// Nix-store Chromium (fully self-contained wrapper with correct library paths)
+const CHROMIUM_PATH = '/nix/store/gasnw5878924jbw6bql257ll29hkm4fd-chromium-123.0.6312.105/bin/chromium';
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function log(tag, msg) {
+  const t = new Date().toTimeString().slice(0, 8);
+  console.log(`[${t}] [${String(tag).padEnd(9)}] ${msg}`);
 }
 
-// ── Configuration ───────────────────────────────────────────────────────────
-const CONFIG = {
-  targetUrl:      process.env.TARGET_URL          || 'https://share.gemini.google/EIt5nvt7wCXV',
-  imagePath:      process.env.IMAGE_PATH          || path.join(__dirname, 'input.jpg'),
-  prompt:         process.env.PROMPT              || 'A beautiful sunset over the mountains',
-  outputCount:    parseInt(process.env.OUTPUT_COUNT || '1', 10),
-  outputDir:      process.env.OUTPUT_DIR          || path.join(__dirname, 'output'),
-  headless:       process.env.HEADLESS            !== 'false',
-  timeoutMs:      parseInt(process.env.PROCESS_TIMEOUT_MS || '120000', 10),
-  cookieString:   process.env.COOKIE_STRING       || '',
-};
+function ensureDir(d) { if (!fs.existsSync(d)) fs.mkdirSync(d, { recursive: true }); }
 
-// ── Chromium executable path ────────────────────────────────────────────────
-// Prefer the downloaded Playwright headless shell; fall back to system Chromium.
-const POSSIBLE_CHROME_PATHS = [
-  // Playwright headless-shell downloaded by `npx playwright install chromium`
-  path.join(__dirname, '..', '.cache', 'ms-playwright', 'chromium_headless_shell-1228',
-            'chrome-headless-shell-linux64', 'chrome-headless-shell'),
-  path.join(process.env.HOME || '/root', '.cache', 'ms-playwright',
-            'chromium_headless_shell-1228', 'chrome-headless-shell-linux64', 'chrome-headless-shell'),
-  // System Chromium installed via Nix
-  process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
-  '/run/current-system/sw/bin/chromium',
-  '/usr/bin/chromium',
-  '/usr/bin/chromium-browser',
-  '/usr/bin/google-chrome',
-].filter(Boolean);
-
-function resolveChromiumPath() {
-  for (const p of POSSIBLE_CHROME_PATHS) {
-    if (fs.existsSync(p)) {
-      console.log(`[browser] Using Chromium at: ${p}`);
-      return p;
-    }
-  }
-  console.log('[browser] No explicit Chromium path found – letting Playwright auto-detect.');
-  return undefined;
+/** Playwright only accepts 'Strict' | 'Lax' | 'None' for sameSite. */
+function normaliseSameSite(raw) {
+  if (!raw) return 'Lax';
+  const v = String(raw).toLowerCase();
+  if (v === 'strict')                       return 'Strict';
+  if (v === 'lax')                          return 'Lax';
+  if (v === 'none' || v === 'no_restriction') return 'None';
+  return 'Lax';   // 'unspecified' and anything else
 }
 
-// ── Cookie helpers ──────────────────────────────────────────────────────────
-
-/**
- * Load cookies from cookies.json if it exists.
- * Returns an array of Playwright-compatible cookie objects.
- */
-function loadCookiesFromFile() {
-  const cookiesFile = path.join(__dirname, 'cookies.json');
-  if (!fs.existsSync(cookiesFile)) return [];
-
-  try {
-    const raw = JSON.parse(fs.readFileSync(cookiesFile, 'utf8'));
-    console.log(`[auth] Loaded ${raw.length} cookies from cookies.json`);
-    return raw.map(normaliseCookie);
-  } catch (err) {
-    console.warn(`[auth] Could not parse cookies.json: ${err.message}`);
-    return [];
-  }
-}
-
-/**
- * Parse a raw "Cookie: …" header string into Playwright cookie objects.
- * Each pair is assumed to belong to .google.com.
- */
-function parseCookieString(raw) {
-  if (!raw || !raw.trim()) return [];
-
-  const cookies = raw.split(';').map(part => {
-    const [name, ...rest] = part.trim().split('=');
-    return {
-      name:     name.trim(),
-      value:    rest.join('=').trim(),
-      domain:   '.google.com',
-      path:     '/',
-      httpOnly: false,
-      secure:   true,
-      sameSite: 'None',
+function loadCookies() {
+  if (!fs.existsSync(COOKIES_PATH)) throw new Error(`cookies.json not found at ${COOKIES_PATH}`);
+  const raw = JSON.parse(fs.readFileSync(COOKIES_PATH, 'utf8'));
+  const cooked = raw.map(c => {
+    const out = {
+      name:     c.name,
+      value:    c.value,
+      domain:   c.domain   || '.google.com',
+      path:     c.path     || '/',
+      httpOnly: c.httpOnly ?? false,
+      secure:   c.secure   ?? true,
+      sameSite: normaliseSameSite(c.sameSite),
     };
-  }).filter(c => c.name && c.value);
-
-  console.log(`[auth] Parsed ${cookies.length} cookies from COOKIE_STRING env var`);
-  return cookies;
-}
-
-/** Ensure a cookie object has all fields Playwright requires. */
-function normaliseCookie(c) {
-  return {
-    name:     c.name,
-    value:    c.value,
-    domain:   c.domain   || '.google.com',
-    path:     c.path     || '/',
-    expires:  c.expires  || -1,
-    httpOnly: c.httpOnly ?? false,
-    secure:   c.secure   ?? true,
-    sameSite: c.sameSite || 'None',
-  };
-}
-
-// ── Output directory ────────────────────────────────────────────────────────
-function ensureOutputDir() {
-  if (!fs.existsSync(CONFIG.outputDir)) {
-    fs.mkdirSync(CONFIG.outputDir, { recursive: true });
-    console.log(`[output] Created output directory: ${CONFIG.outputDir}`);
-  }
-}
-
-// ── Save a base64 data URL to disk ──────────────────────────────────────────
-function saveDataUrl(dataUrl, index) {
-  // dataUrl format: "data:<mimeType>;base64,<data>"
-  const [header, base64Data] = dataUrl.split(',');
-  if (!base64Data) throw new Error('Invalid data URL: no base64 payload found.');
-
-  const mimeMatch = header.match(/data:([^;]+)/);
-  const mimeType  = mimeMatch ? mimeMatch[1] : 'image/png';
-  const ext       = mimeType.split('/')[1]?.replace(/\+.*$/, '') || 'png';
-
-  const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-  const filename  = `result_${timestamp}_${index + 1}.${ext}`;
-  const filepath  = path.join(CONFIG.outputDir, filename);
-
-  fs.writeFileSync(filepath, Buffer.from(base64Data, 'base64'));
-  console.log(`[output] ✅ Saved: ${filepath}  (${Math.round(base64Data.length * 0.75 / 1024)} KB)`);
-  return filepath;
-}
-
-// ── Main automation ─────────────────────────────────────────────────────────
-async function run() {
-  console.log('══════════════════════════════════════════════════════════');
-  console.log('  Gemini Canvas Automation');
-  console.log('══════════════════════════════════════════════════════════');
-  console.log(`  Target URL    : ${CONFIG.targetUrl}`);
-  console.log(`  Image path    : ${CONFIG.imagePath}`);
-  console.log(`  Prompt        : ${CONFIG.prompt}`);
-  console.log(`  Output count  : ${CONFIG.outputCount}`);
-  console.log(`  Output dir    : ${CONFIG.outputDir}`);
-  console.log(`  Headless      : ${CONFIG.headless}`);
-  console.log(`  Timeout       : ${CONFIG.timeoutMs} ms`);
-  console.log('══════════════════════════════════════════════════════════\n');
-
-  // Validate image exists before launching the browser
-  if (!fs.existsSync(CONFIG.imagePath)) {
-    console.error(`[error] Image file not found: ${CONFIG.imagePath}`);
-    console.error('        Set IMAGE_PATH in .env or place "input.jpg" next to this script.');
-    process.exit(1);
-  }
-
-  ensureOutputDir();
-
-  // ── Resolve cookies ───────────────────────────────────────────────────────
-  const cookiesFromFile   = loadCookiesFromFile();
-  const cookiesFromString = parseCookieString(CONFIG.cookieString);
-  // File cookies take precedence; env string cookies fill any gaps
-  const allCookies = cookiesFromFile.length > 0 ? cookiesFromFile : cookiesFromString;
-
-  if (allCookies.length === 0) {
-    console.warn('[auth] ⚠️  No cookies provided. The page may require authentication.');
-    console.warn('           Copy cookies.example.json → cookies.json and fill in your values.');
-  }
-
-  // ── Launch browser ────────────────────────────────────────────────────────
-  const executablePath = resolveChromiumPath();
-
-  const browser = await chromium.launch({
-    headless:       CONFIG.headless,
-    executablePath,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--disable-software-rasterizer',
-      '--disable-extensions',
-      '--disable-background-networking',
-      '--disable-default-apps',
-      '--no-first-run',
-      '--no-zygote',
-      '--single-process',             // helps in resource-constrained envs
-      '--disable-blink-features=AutomationControlled',
-      '--disable-web-security',       // needed to access iframe from blob URLs
-      '--allow-running-insecure-content',
-    ],
+    if (typeof c.expirationDate === 'number') out.expires = c.expirationDate;
+    else if (typeof c.expires === 'number')   out.expires = c.expires;
+    return out;
   });
-
-  const context = await browser.newContext({
-    viewport:          { width: 1280, height: 900 },
-    userAgent:         'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
-                     + '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    locale:            'ar-SA',
-    timezoneId:        'Asia/Riyadh',
-    acceptDownloads:   false,         // we extract data URLs ourselves
-    bypassCSP:         true,          // bypass Content-Security-Policy in iframe
-    ignoreHTTPSErrors: true,
-  });
-
-  // Inject cookies before any navigation
-  if (allCookies.length > 0) {
-    await context.addCookies(allCookies);
-    console.log(`[auth] Injected ${allCookies.length} cookies into browser context.`);
-  }
-
-  const page = await context.newPage();
-
-  // Forward browser console messages for debugging
-  page.on('console', msg => {
-    if (['error', 'warning'].includes(msg.type())) {
-      console.log(`[browser ${msg.type()}] ${msg.text()}`);
-    }
-  });
-
-  try {
-    // ── Step 1: Navigate to the target URL ─────────────────────────────────
-    console.log('\n[step 1] Navigating to target URL…');
-    await page.goto(CONFIG.targetUrl, {
-      waitUntil: 'networkidle',
-      timeout:   60_000,
-    });
-    console.log('[step 1] Page loaded. Title:', await page.title());
-
-    // Short pause to allow React hydration inside the canvas iframe
-    await page.waitForTimeout(3000);
-
-    // ── Step 2: Locate the canvas iframe ──────────────────────────────────
-    console.log('\n[step 2] Locating canvas iframe…');
-    const iframeHandle = await findCanvasIframe(page);
-    if (!iframeHandle) {
-      throw new Error(
-        'Could not locate the canvas iframe. ' +
-        'Check that the URL is valid and authentication cookies are correct.'
-      );
-    }
-    const frame = await iframeHandle.contentFrame();
-    if (!frame) throw new Error('Could not obtain a Frame reference from the iframe element.');
-    console.log('[step 2] ✅ Canvas iframe found. URL:', frame.url());
-
-    // Extra wait for the React app to fully mount
-    await frame.waitForLoadState('domcontentloaded');
-    await page.waitForTimeout(2000);
-
-    // ── Step 3: Upload image via hidden file input ─────────────────────────
-    console.log('\n[step 3] Uploading image via hidden file input…');
-    await uploadImageViaHiddenInput(frame, CONFIG.imagePath);
-    console.log('[step 3] ✅ Image upload dispatched.');
-
-    // ── Step 4: Fill in the prompt ────────────────────────────────────────
-    console.log('\n[step 4] Filling in the prompt…');
-    await fillPrompt(frame, CONFIG.prompt);
-    console.log('[step 4] ✅ Prompt entered.');
-
-    // ── Step 5: Set output count ──────────────────────────────────────────
-    console.log('\n[step 5] Setting output image count to', CONFIG.outputCount);
-    await setOutputCount(frame, CONFIG.outputCount);
-    console.log('[step 5] ✅ Output count set.');
-
-    // ── Step 6: Click "بدء التحويل" (Start Processing) ───────────────────
-    console.log('\n[step 6] Clicking "بدء التحويل"…');
-    await clickStartButton(frame);
-    console.log('[step 6] ✅ Processing started.');
-
-    // ── Step 7: Wait for completion and the download button ───────────────
-    console.log(`\n[step 7] Waiting for processing to complete (timeout: ${CONFIG.timeoutMs} ms)…`);
-    await waitForDownloadButton(frame, CONFIG.timeoutMs);
-    console.log('[step 7] ✅ Processing complete. Download button is visible.');
-
-    // Short extra wait so all images are rendered
-    await page.waitForTimeout(1500);
-
-    // ── Step 8: Extract data URLs from download links ─────────────────────
-    console.log('\n[step 8] Extracting result image data URLs…');
-    const dataUrls = await extractDownloadDataUrls(frame);
-    if (dataUrls.length === 0) {
-      throw new Error('No data URLs found in download buttons. The app may have changed its structure.');
-    }
-    console.log(`[step 8] ✅ Found ${dataUrls.length} result image(s).`);
-
-    // ── Step 9: Save images to disk ───────────────────────────────────────
-    console.log('\n[step 9] Saving result images…');
-    const savedPaths = [];
-    for (let i = 0; i < dataUrls.length; i++) {
-      const saved = saveDataUrl(dataUrls[i], i);
-      savedPaths.push(saved);
-    }
-
-    console.log('\n══════════════════════════════════════════════════════════');
-    console.log(`  ✅ Done! ${savedPaths.length} image(s) saved.`);
-    savedPaths.forEach(p => console.log(`     ${p}`));
-    console.log('══════════════════════════════════════════════════════════');
-
-  } finally {
-    await browser.close();
-  }
+  log('auth', `Loaded ${cooked.length} cookies from ${COOKIES_PATH}`);
+  return cooked;
 }
 
-// ── Helper functions ────────────────────────────────────────────────────────
-
-/** Infer a MIME type from a file extension. */
-function guessMimeType(filePath) {
-  const ext = path.extname(filePath).toLowerCase();
-  const map = {
-    '.jpg':  'image/jpeg',
-    '.jpeg': 'image/jpeg',
-    '.png':  'image/png',
-    '.gif':  'image/gif',
-    '.webp': 'image/webp',
-    '.bmp':  'image/bmp',
-    '.tiff': 'image/tiff',
-    '.tif':  'image/tiff',
-    '.svg':  'image/svg+xml',
-    '.avif': 'image/avif',
-  };
-  return map[ext] || 'image/jpeg';
+async function saveDataUrl(dataUrl, label) {
+  const [header, b64] = dataUrl.split(',');
+  if (!b64) throw new Error('No base64 payload in data URL');
+  const mime = (header.match(/data:([^;]+)/) || [])[1] || 'image/png';
+  const ext  = mime.split('/')[1]?.replace(/\+.*$/, '') || 'png';
+  const file = path.join(OUTPUT_DIR, `${label}.${ext}`);
+  fs.writeFileSync(file, Buffer.from(b64, 'base64'));
+  log('save', `Wrote ${Math.round(b64.length * 0.75 / 1024)} KB → ${file}`);
+  return file;
 }
 
-/**
- * Locate the canvas iframe with positive structural validation.
- *
- * Rather than picking the largest/first iframe blindly, we confirm the
- * selected frame actually hosts the canvas React app by checking for
- * structural markers (expected DOM elements) before returning it.
- *
- * Strategy:
- *  1. Collect all candidate iframes via ordered selectors.
- *  2. For each candidate, obtain its FrameContext and run a lightweight
- *     structural probe to confirm it is the canvas app.
- *  3. Return the first frame that passes validation.
- *  4. If none pass, fall back to the largest-by-area candidate and warn.
- */
-async function findCanvasIframe(page) {
-  // Ordered candidate selectors – most specific first
-  const candidateSelectors = [
-    'iframe[sandbox]',
-    'iframe[src^="blob:"]',
-    'iframe.canvas-iframe',
-    'iframe[title*="canvas" i]',
-    'iframe[title*="preview" i]',
-    'iframe[title*="app" i]',
-    'iframe',
-  ];
+// ─── Canvas iframe discovery ──────────────────────────────────────────────────
+async function findCanvasFrame(page) {
+  log('iframe', 'Locating canvas iframe…');
 
-  // DOM markers that indicate the canvas React app is rendered inside
-  const appMarkers = [
-    'input[type="file"]',         // file upload input
-    'button',                     // any interactive button
-    'textarea, input[type="text"], [contenteditable]', // prompt area
-    '[class*="app" i], #root, #app, main', // typical React root containers
-  ];
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    const iframes = await page.$$('iframe');
+    log('iframe', `Attempt ${attempt}: ${iframes.length} iframe(s) on page`);
 
-  // Collect all unique iframe handles (deduplicate across selectors)
-  const seen    = new Set();
-  const handles = [];
+    let best = null, bestArea = 0;
+    for (const h of iframes) {
+      const frame = await h.contentFrame().catch(() => null);
+      if (!frame) continue;
+      await frame.waitForLoadState('domcontentloaded').catch(() => {});
 
-  for (const sel of candidateSelectors) {
-    const els = await page.$(sel);
-    for (const el of els) {
-      const id = await el.evaluate(e => {
-        // Use a composite key: src + className + approximate position
-        const r = e.getBoundingClientRect();
-        return `${e.src}|${e.className}|${Math.round(r.left)}|${Math.round(r.top)}`;
-      }).catch(() => Math.random().toString());
-
-      if (!seen.has(id)) {
-        seen.add(id);
-        handles.push(el);
+      // Structural probe: canvas app has a textarea + a button
+      const hasInput  = await frame.$('textarea, input[type="text"], input[type="number"]').catch(() => null);
+      const hasButton = await frame.$('button').catch(() => null);
+      if (hasInput && hasButton) {
+        const box  = await h.boundingBox().catch(() => null);
+        const area = box ? box.width * box.height : 0;
+        if (area > bestArea) { bestArea = area; best = { handle: h, frame }; }
       }
     }
-  }
 
-  if (handles.length === 0) {
-    console.error('[iframe] No iframes found on the page at all.');
-    return null;
-  }
-
-  console.log(`[iframe] Found ${handles.length} candidate iframe(s). Running structural validation…`);
-
-  // Phase 1: structural validation
-  for (const handle of handles) {
-    const frame = await handle.contentFrame().catch(() => null);
-    if (!frame) continue;
-
-    // Wait briefly for the frame to finish loading
-    await frame.waitForLoadState('domcontentloaded').catch(() => {});
-
-    for (const marker of appMarkers) {
-      try {
-        const el = await frame.$(marker);
-        if (el) {
-          const box = await handle.boundingBox().catch(() => null);
-          const area = box ? Math.round(box.width * box.height) : 0;
-          console.log(
-            `[iframe] ✅ Validated canvas iframe via marker "${marker}" ` +
-            `(area: ${area}px², url: ${frame.url().slice(0, 80)})`
-          );
-          return handle;
-        }
-      } catch (_) { /* marker absent – try next */ }
+    if (best) {
+      log('iframe', `✅ Canvas frame validated (area ${Math.round(bestArea)}px²)`);
+      return best.frame;
     }
+
+    log('iframe', `No validated frame yet — waiting 3s…`);
+    await sleep(3000);
   }
 
-  // Phase 2: fallback – largest visible iframe, with a clear warning
-  console.warn(
-    '[iframe] ⚠️  No iframe passed structural validation. ' +
-    'Falling back to largest-by-area iframe — results may be unreliable.'
-  );
-
-  let best     = null;
-  let bestArea = 0;
-
-  for (const handle of handles) {
-    const box = await handle.boundingBox().catch(() => null);
-    if (!box) continue;
-    const area = box.width * box.height;
-    if (area > bestArea) {
-      bestArea = area;
-      best     = handle;
-    }
+  // Last-resort: largest iframe by area
+  log('iframe', '⚠️  Validation failed — using largest iframe as fallback');
+  const all = await page.$$('iframe');
+  let fb = null, fbArea = 0;
+  for (const h of all) {
+    const b = await h.boundingBox().catch(() => null);
+    if (!b) continue;
+    const a = b.width * b.height;
+    if (a > fbArea) { fbArea = a; fb = h; }
   }
-
-  if (best) {
-    console.warn(`[iframe] Using fallback iframe (area: ${Math.round(bestArea)}px²). Inspect the page manually if things go wrong.`);
-  }
-  return best;
+  if (!fb) throw new Error('No iframes found on page at all.');
+  return fb.contentFrame();
 }
 
-/**
- * Upload an image by targeting the hidden <input type="file"> element directly.
- * This bypasses the browser's native file-chooser dialog which sandboxed iframes block.
- */
-async function uploadImageViaHiddenInput(frame, imagePath) {
-  const absoluteImagePath = path.resolve(imagePath);
+// ─── Step: enter prompt ───────────────────────────────────────────────────────
+async function enterPrompt(frame, text) {
+  log('prompt', `Typing: "${text}"`);
+  const PLACEHOLDER = 'ما الذي تود رسمه؟';
 
-  // Try multiple selectors for the file input
-  const fileInputSelectors = [
-    'input[type="file"]',
-    'input[accept*="image"]',
-    'input[accept*="*"]',
-  ];
-
-  let fileInput = null;
-  for (const sel of fileInputSelectors) {
-    try {
-      fileInput = await frame.$(sel);
-      if (fileInput) {
-        console.log(`[upload] Found file input with selector: ${sel}`);
-        break;
-      }
-    } catch (_) { /* try next */ }
-  }
-
-  if (!fileInput) {
-    // Last resort: inject the file directly via page.evaluate + DataTransfer.
-    // This avoids the Playwright-specific setInputFiles API which requires an
-    // ElementHandle (not a plain JSHandle from evaluateHandle).
-    console.warn('[upload] Standard file input not found. Trying DataTransfer injection…');
-
-    const fileBytes = fs.readFileSync(absoluteImagePath);
-    const base64    = fileBytes.toString('base64');
-    const mimeType  = guessMimeType(absoluteImagePath);
-    const fileName  = path.basename(absoluteImagePath);
-
-    const injected = await frame.evaluate(
-      async ({ base64, mimeType, fileName }) => {
-        // Locate file input anywhere in the DOM including shadow roots
-        function findFileInput(root) {
-          for (const el of root.querySelectorAll('input[type="file"]')) return el;
-          for (const el of root.querySelectorAll('*')) {
-            if (el.shadowRoot) {
-              const found = findFileInput(el.shadowRoot);
-              if (found) return found;
-            }
-          }
-          return null;
-        }
-        const input = findFileInput(document);
-        if (!input) return false;
-
-        // Reconstruct the File from base64 inside the page context
-        const bytes   = Uint8Array.from(atob(base64), c => c.charCodeAt(0));
-        const file    = new File([bytes], fileName, { type: mimeType });
-        const dt      = new DataTransfer();
-        dt.items.add(file);
-        Object.defineProperty(input, 'files', { value: dt.files, configurable: true });
-        input.dispatchEvent(new Event('change', { bubbles: true }));
-        input.dispatchEvent(new Event('input',  { bubbles: true }));
-        return true;
-      },
-      { base64, mimeType, fileName }
-    );
-
-    if (!injected) {
-      throw new Error(
-        'Could not find <input type="file"> in the canvas iframe (including shadow DOM). ' +
-        'The app structure may have changed or the iframe is still loading.'
-      );
-    }
-
-    console.log('[upload] File injected via DataTransfer (shadow DOM path).');
-    await frame.waitForTimeout(1500);
-    return; // done — skip the setInputFiles call below
-  }
-
-  // Use force: true to bypass visibility/enabled checks (the input is hidden by design)
-  await fileInput.setInputFiles(absoluteImagePath, { force: true });
-
-  // Wait a moment for the app to process the file selection event
-  await frame.waitForTimeout(1500);
-}
-
-/**
- * Fill in the prompt text field.
- * Tries textarea first, then generic text inputs, then contenteditable divs.
- */
-async function fillPrompt(frame, promptText) {
   const selectors = [
+    `textarea[placeholder*="${PLACEHOLDER}"]`,
+    `input[placeholder*="${PLACEHOLDER}"]`,
     'textarea',
-    'input[type="text"]',
-    'input[placeholder]',
     '[contenteditable="true"]',
     '[role="textbox"]',
-    '.prompt-input',
-    '#prompt',
-    '[name="prompt"]',
   ];
 
   for (const sel of selectors) {
-    const el = await frame.$(sel);
+    const el = await frame.$(sel).catch(() => null);
     if (!el) continue;
-
-    try {
-      const tag = await el.evaluate(e => e.tagName.toLowerCase());
-      const isContentEditable = await el.evaluate(e => e.isContentEditable);
-
-      await el.click({ clickCount: 3 }); // select all existing text
-      await el.press('Backspace');        // clear it
-
-      if (isContentEditable || tag === 'div' || tag === 'span') {
-        await el.evaluate((e, text) => { e.textContent = text; }, promptText);
-        // Dispatch input event so React picks up the change
-        await el.evaluate(e => e.dispatchEvent(new Event('input', { bubbles: true })));
-      } else {
-        await el.fill(promptText);
-      }
-
-      const value = await el.evaluate(e => e.value || e.textContent);
-      if (value && value.trim().length > 0) {
-        console.log(`[prompt] Entered prompt via selector: ${sel}`);
-        return;
-      }
-    } catch (_) { /* try next */ }
+    await el.click({ clickCount: 3 });
+    await sleep(150);
+    await el.fill('');
+    await sleep(100);
+    const isEditable = await el.evaluate(e => e.isContentEditable);
+    if (isEditable) {
+      await el.evaluate((e, t) => {
+        e.textContent = t;
+        e.dispatchEvent(new Event('input',  { bubbles: true }));
+        e.dispatchEvent(new Event('change', { bubbles: true }));
+      }, text);
+    } else {
+      await el.fill(text);
+    }
+    const got = await el.evaluate(e => e.value || e.textContent || '');
+    if (got.trim().length > 0) {
+      log('prompt', `✅ Entered via "${sel}"`);
+      return;
+    }
   }
-
-  throw new Error('Could not locate a prompt text field in the canvas iframe.');
+  throw new Error('Could not locate the prompt textarea.');
 }
 
-/**
- * Set the "Output Images" numerical counter to the desired count.
- */
-async function setOutputCount(frame, count) {
-  // Look for a numeric input (often a spinner / stepper)
-  const numericSelectors = [
-    'input[type="number"]',
-    'input[inputmode="numeric"]',
-    'input[name*="count" i]',
-    'input[name*="quantity" i]',
-    'input[name*="output" i]',
-    'input[placeholder*="عدد" i]',  // Arabic: "number"
-    'input[aria-label*="output" i]',
-  ];
+// ─── Step: set image count ────────────────────────────────────────────────────
+async function setCount(frame, count) {
+  log('count', `Setting image count = ${count}`);
 
-  for (const sel of numericSelectors) {
-    const el = await frame.$(sel);
-    if (!el) continue;
+  // Strategy 1: find label containing "العدد:" then locate nearby input
+  const found = await frame.evaluate((lbl) => {
+    const all = Array.from(document.querySelectorAll('*'));
+    for (const el of all) {
+      if (el.children.length === 0 && el.textContent.includes(lbl)) {
+        const container = el.closest('div, section, form, label') || el.parentElement;
+        if (!container) continue;
+        const inp = container.querySelector('input[type="number"], input[type="text"], input');
+        if (inp) { inp.focus(); inp.select(); return true; }
+      }
+    }
+    return false;
+  }, 'العدد:');
 
-    try {
-      await el.click({ clickCount: 3 });
-      await el.fill(String(count));
-      await el.evaluate(e => e.dispatchEvent(new Event('input', { bubbles: true })));
-      await el.evaluate(e => e.dispatchEvent(new Event('change', { bubbles: true })));
-      console.log(`[count] Set output count via selector: ${sel}`);
-      return;
-    } catch (_) { /* try next */ }
-  }
-
-  // If no numeric input found, look for + / - stepper buttons and click + until target
-  const plusSelectors = [
-    'button[aria-label*="increase" i]',
-    'button[aria-label*="زيادة" i]',   // Arabic: "increase"
-    'button:has-text("+")',
-    '[data-action="increment"]',
-  ];
-  for (const sel of plusSelectors) {
-    const btn = await frame.$(sel);
-    if (!btn) continue;
-
-    // Read current value
-    const currentInput = await frame.$('input[type="number"]');
-    if (currentInput) {
-      const current = parseInt(await currentInput.inputValue() || '1', 10);
-      const clicks   = count - current;
-      for (let i = 0; i < clicks; i++) await btn.click();
-      console.log(`[count] Adjusted output count using stepper button (+${clicks} clicks).`);
+  if (found) {
+    const focused = await frame.$(':focus');
+    if (focused) {
+      await focused.fill(String(count));
+      await focused.evaluate((e, v) => {
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        if (setter) setter.call(e, v);
+        e.dispatchEvent(new Event('input',  { bubbles: true }));
+        e.dispatchEvent(new Event('change', { bubbles: true }));
+      }, String(count));
+      log('count', '✅ Count set via label proximity');
       return;
     }
   }
 
-  console.warn('[count] Could not find output count control – proceeding with default.');
-}
-
-/**
- * Locate and click the "بدء التحويل" (Start Processing) button.
- */
-async function clickStartButton(frame) {
-  // Try Arabic text first, then common button patterns
-  const startSelectors = [
-    // Arabic text buttons
-    'button:has-text("بدء التحويل")',
-    'button:has-text("بدء")',
-    '[role="button"]:has-text("بدء التحويل")',
-    // Generic "start / generate / submit" patterns as fallbacks
-    'button[type="submit"]',
-    'button:has-text("Generate")',
-    'button:has-text("Start")',
-    'button:has-text("Submit")',
-    '.start-button',
-    '#start',
-    '[data-action="start"]',
-  ];
-
-  for (const sel of startSelectors) {
-    try {
-      const btn = await frame.$(sel);
-      if (!btn) continue;
-
-      const isDisabled = await btn.evaluate(el =>
-        el.disabled || el.getAttribute('aria-disabled') === 'true'
-      );
-      if (isDisabled) {
-        console.warn(`[start] Button "${sel}" is disabled – skipping.`);
-        continue;
-      }
-
-      await btn.click();
-      console.log(`[start] Clicked start button via selector: ${sel}`);
-      return;
-    } catch (_) { /* try next */ }
+  // Strategy 2: numeric input selectors
+  for (const sel of ['input[type="number"]', 'input[inputmode="numeric"]']) {
+    const el = await frame.$(sel).catch(() => null);
+    if (!el) continue;
+    await el.click({ clickCount: 3 });
+    await el.fill(String(count));
+    await el.evaluate((e, v) => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      if (setter) setter.call(e, v);
+      e.dispatchEvent(new Event('input',  { bubbles: true }));
+      e.dispatchEvent(new Event('change', { bubbles: true }));
+    }, String(count));
+    log('count', `✅ Count set via "${sel}"`);
+    return;
   }
 
-  // Last resort: find ANY button that is not the image upload trigger
-  const allButtons = await frame.$$('button:not([disabled])');
-  console.warn(`[start] Specific start button not found. Searching ${allButtons.length} buttons by content…`);
+  log('count', '⚠️  Count field not found — using app default');
+}
 
-  for (const btn of allButtons) {
-    const text = await btn.evaluate(el => el.innerText?.trim() || '');
-    if (text.includes('بدء') || text.toLowerCase().includes('start') ||
-        text.toLowerCase().includes('generate') || text.toLowerCase().includes('convert')) {
+// ─── Step: click generate ─────────────────────────────────────────────────────
+async function clickGenerate(frame) {
+  log('generate', 'Clicking "توليد الآن"…');
+
+  const selectors = [
+    'button:has-text("توليد الآن")',
+    '[role="button"]:has-text("توليد الآن")',
+    'button:has-text("توليد")',
+  ];
+
+  for (const sel of selectors) {
+    const btns = await frame.$$(sel);
+    for (const btn of btns) {
+      const disabled = await btn.evaluate(e => e.disabled || e.getAttribute('aria-disabled') === 'true').catch(() => false);
+      if (disabled) continue;
+      const txt = await btn.evaluate(e => e.innerText?.trim()).catch(() => '');
       await btn.click();
-      console.log(`[start] Clicked button with text: "${text}"`);
+      log('generate', `✅ Clicked: "${txt}"`);
       return;
     }
   }
-
-  throw new Error('Could not locate the "بدء التحويل" start button in the canvas iframe.');
+  throw new Error('Could not find "توليد الآن" button.');
 }
 
-/**
- * Wait until at least one "تحميل" (Download) button is visible,
- * indicating that processing is complete.
- *
- * Uses multi-match queries ($) so a hidden/stale first element does not
- * cause the loop to miss a visible second element.
- */
-async function waitForDownloadButton(frame, timeoutMs) {
-  const downloadSelectors = [
-    // Arabic "تحميل" = Download
-    'a:has-text("تحميل")',
-    'button:has-text("تحميل")',
-    '[role="button"]:has-text("تحميل")',
-    // English fallbacks
-    'a[download]',
-    'a:has-text("Download")',
-    'button:has-text("Download")',
-    '.download-button',
-    '[data-action="download"]',
-    'a[href^="data:"]',
-    'a[href^="blob:"]',
-  ];
-
+// ─── Step: wait for thumbnails ────────────────────────────────────────────────
+async function waitForThumbnails(frame, timeoutMs) {
+  log('wait', `Waiting up to ${timeoutMs / 1000}s for generated thumbnails…`);
   const startedAt = Date.now();
   const deadline  = startedAt + timeoutMs;
 
   while (Date.now() < deadline) {
-    for (const sel of downloadSelectors) {
+    const elapsed = Math.round((Date.now() - startedAt) / 1000);
+
+    // Look for any img with real pixel content (naturalWidth > 50) that is visible
+    const imgs = await frame.$$('img');
+    for (const img of imgs) {
       try {
-        // Use $ (multi-match) so we check EVERY matching element, not just the first.
-        const elements = await frame.$(sel);
-        for (const el of elements) {
-          try {
-            if (await el.isVisible()) {
-              process.stdout.write('\n');
-              console.log(`[wait] Download element visible via selector: "${sel}"`);
-              return el;
-            }
-          } catch (_) { /* element detached between query and check – skip */ }
+        const info = await img.evaluate(el => ({
+          src:      el.src || '',
+          natural:  el.naturalWidth,
+          w:        el.getBoundingClientRect().width,
+          visible:  el.offsetParent !== null,
+        }));
+        if (info.visible && info.natural > 50 && info.w > 50 &&
+            (info.src.startsWith('data:') || info.src.startsWith('blob:') ||
+             /\.(jpg|jpeg|png|webp)/i.test(info.src))) {
+          process.stdout.write('\n');
+          log('wait', `✅ Thumbnail found after ${elapsed}s (src: ${info.src.slice(0,80)})`);
+          return img;
         }
-      } catch (_) { /* selector not yet in DOM – continue */ }
+      } catch (_) {}
     }
 
-    // Watch for explicit error states (inform but don't abort – app may recover)
-    try {
-      const errorEls = await frame.$('[class*="error" i], [class*="alert" i], [role="alert"]');
-      for (const el of errorEls) {
-        const errText = await el.evaluate(e => e.innerText?.trim()).catch(() => '');
-        if (errText) {
-          process.stdout.write('\n');
-          console.warn(`[wait] UI error indicator: "${errText}"`);
-          break;
-        }
+    // Result container patterns
+    for (const sel of [
+      '[class*="result" i] img', '[class*="output" i] img',
+      '[class*="generated" i] img', '[class*="gallery" i] img',
+      '[class*="thumbnail" i]', '[class*="image-card" i] img',
+    ]) {
+      const els = await frame.$$(sel).catch(() => []);
+      if (els.length > 0) {
+        process.stdout.write('\n');
+        log('wait', `✅ Result grid via "${sel}" (${els.length} items, ${elapsed}s)`);
+        return els[0];
       }
-    } catch (_) { /* ignore */ }
+    }
 
-    const elapsed = Math.round((Date.now() - startedAt) / 1000);
-    process.stdout.write(`\r[wait] Still processing… ${elapsed}s elapsed (timeout: ${timeoutMs / 1000}s)`);
-    await frame.waitForTimeout(2000);
+    process.stdout.write(`\r[wait     ] ${elapsed}s elapsed — waiting for thumbnails…`);
+    await sleep(2000);
   }
 
   process.stdout.write('\n');
-  throw new Error(
-    `Timed out after ${timeoutMs / 1000}s waiting for the download button. ` +
-    'The canvas app may still be processing or an error occurred.'
+  throw new Error(`Generation timed out after ${timeoutMs / 1000}s.`);
+}
+
+// ─── Step: open thumbnail then download ──────────────────────────────────────
+async function downloadResult(frame, page, thumbnail) {
+  // Click the thumbnail to open full-size viewer
+  log('download', 'Clicking first thumbnail to open viewer…');
+  try {
+    await thumbnail.click();
+  } catch (_) {
+    await thumbnail.evaluate(el => {
+      let n = el;
+      for (let i = 0; i < 5; i++) {
+        n = n.parentElement;
+        if (!n) break;
+        const tag = n.tagName?.toLowerCase();
+        if (tag === 'button' || tag === 'a' || n.getAttribute('role') === 'button') {
+          return n.click();
+        }
+      }
+      el.click();
+    });
+  }
+  await sleep(2000);
+
+  // Wait for "تحميل" button
+  log('download', 'Waiting for "تحميل" button…');
+  const dlDeadline = Date.now() + 20_000;
+  let dlBtn = null;
+
+  while (Date.now() < dlDeadline) {
+    const selectors = [
+      'a:has-text("تحميل")', 'button:has-text("تحميل")',
+      '[role="button"]:has-text("تحميل")',
+      'a[download]', 'a[href^="data:"]', 'a[href^="blob:"]',
+    ];
+    for (const sel of selectors) {
+      const els = await frame.$$(sel).catch(() => []);
+      for (const el of els) {
+        if (await el.isVisible().catch(() => false)) {
+          dlBtn = el; break;
+        }
+      }
+      if (dlBtn) break;
+    }
+    if (dlBtn) break;
+    process.stdout.write(`\r[download ] waiting for تحميل button…`);
+    await sleep(1000);
+  }
+  process.stdout.write('\n');
+
+  if (!dlBtn) throw new Error('"تحميل" button did not appear within 20s.');
+  log('download', '✅ "تحميل" button found');
+
+  // Extract href if it's a data: or blob: URL (avoid browser dialog)
+  const href = await dlBtn.evaluate(el => el.href || el.getAttribute('href') || '').catch(() => '');
+
+  if (href.startsWith('data:')) {
+    ensureDir(OUTPUT_DIR);
+    return saveDataUrl(href, 'generated_image');
+  }
+
+  if (href.startsWith('blob:')) {
+    const dataUrl = await frame.evaluate(async (url) => {
+      const res  = await fetch(url);
+      const blob = await res.blob();
+      return new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onloadend = () => res(r.result);
+        r.onerror   = rej;
+        r.readAsDataURL(blob);
+      });
+    }, href);
+    ensureDir(OUTPUT_DIR);
+    return saveDataUrl(dataUrl, 'generated_image');
+  }
+
+  // Intercept browser download event
+  log('download', 'No direct href — intercepting download event…');
+  ensureDir(OUTPUT_DIR);
+  const [dl] = await Promise.all([
+    page.waitForEvent('download', { timeout: 30_000 }).catch(() => null),
+    dlBtn.click(),
+  ]);
+
+  if (dl) {
+    const name = dl.suggestedFilename() || 'generated_image.png';
+    const dest = path.join(OUTPUT_DIR, name);
+    await dl.saveAs(dest);
+    log('download', `✅ Saved via download event → ${dest}`);
+    return dest;
+  }
+
+  // Last resort: grab the largest visible img src after clicking
+  log('download', 'No download event — capturing visible full-size image…');
+  await sleep(1000);
+  for (const img of await frame.$$('img')) {
+    const info = await img.evaluate(e => ({
+      src: e.src || '', w: e.getBoundingClientRect().width, nat: e.naturalWidth,
+    })).catch(() => ({ src: '', w: 0, nat: 0 }));
+    if (info.w > 200 && info.nat > 200 && (info.src.startsWith('data:') || info.src.startsWith('blob:'))) {
+      let dataUrl = info.src;
+      if (dataUrl.startsWith('blob:')) {
+        dataUrl = await frame.evaluate(async (u) => {
+          const r = await fetch(u); const b = await r.blob();
+          return new Promise((res, rej) => { const fr = new FileReader(); fr.onloadend=()=>res(fr.result); fr.onerror=rej; fr.readAsDataURL(b); });
+        }, dataUrl);
+      }
+      return saveDataUrl(dataUrl, 'generated_image');
+    }
+  }
+
+  throw new Error('Could not capture the generated image.');
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+async function main() {
+  console.log('\n╔══════════════════════════════════════════════════════╗');
+  console.log('║   Gemini Canvas — Text-to-Image Automation           ║');
+  console.log('╚══════════════════════════════════════════════════════╝\n');
+
+  ensureDir(OUTPUT_DIR);
+  const cookies = loadCookies();
+
+  const browser = await chromium.launch({
+    headless:       true,
+    executablePath: fs.existsSync(CHROMIUM_PATH) ? CHROMIUM_PATH : undefined,
+    args: [
+      '--no-sandbox', '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage', '--disable-gpu',
+      '--disable-software-rasterizer', '--no-first-run',
+      '--no-zygote', '--disable-web-security',
+      '--allow-running-insecure-content',
+      '--disable-blink-features=AutomationControlled',
+    ],
+  });
+
+  const context = await browser.newContext({
+    viewport:          { width: 1400, height: 900 },
+    userAgent:         'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    locale:            'ar-SA',
+    timezoneId:        'Asia/Riyadh',
+    bypassCSP:         true,
+    ignoreHTTPSErrors: true,
+    acceptDownloads:   true,
+  });
+
+  await context.addCookies(cookies);
+  log('auth', `Injected ${cookies.length} cookies into browser context`);
+
+  const page = await context.newPage();
+  page.on('pageerror', e => log('page-err', e.message.slice(0, 120)));
+
+  let savedImage  = null;
+  let screenshotPath = null;
+
+  try {
+    // ── Navigate ────────────────────────────────────────────────────────────
+    log('nav', `Navigating to ${TARGET_URL}`);
+    await page.goto(TARGET_URL, { waitUntil: 'networkidle', timeout: 60_000 });
+    log('nav', `Title: "${await page.title()}"`);
+
+    // ── WAIT: Canvas React app needs time to fully boot ─────────────────────
+    log('nav', `Waiting ${CANVAS_WAIT / 1000}s for Canvas to fully render…`);
+    await sleep(CANVAS_WAIT);
+
+    // ── Find iframe ──────────────────────────────────────────────────────────
+    const frame = await findCanvasFrame(page);
+
+    // Extra moment for React components to mount
+    await sleep(1500);
+
+    // ── Step 1: Enter prompt ─────────────────────────────────────────────────
+    await enterPrompt(frame, PROMPT);
+    await sleep(600);
+
+    // ── Step 2: Set image count ───────────────────────────────────────────────
+    await setCount(frame, IMAGE_COUNT);
+    await sleep(600);
+
+    // ── Step 3: Click generate ────────────────────────────────────────────────
+    await clickGenerate(frame);
+    log('generate', 'Generation started — waiting for results…');
+
+    // ── Step 4: Wait for thumbnails ───────────────────────────────────────────
+    const thumbnail = await waitForThumbnails(frame, GEN_TIMEOUT);
+    await sleep(1500);
+
+    // ── Step 5: Download ──────────────────────────────────────────────────────
+    savedImage = await downloadResult(frame, page, thumbnail);
+
+    // ── Step 6: Full-page screenshot before closing ────────────────────────────
+    screenshotPath = path.join(OUTPUT_DIR, 'execution_screenshot.png');
+    await page.screenshot({ path: screenshotPath, fullPage: true });
+    log('screenshot', `Saved → ${screenshotPath}`);
+
+  } finally {
+    await browser.close();
+  }
+
+  console.log('\n╔══════════════════════════════════════════════════════╗');
+  console.log('║  ✅  Automation complete!                             ║');
+  console.log('╚══════════════════════════════════════════════════════╝');
+  if (savedImage)     console.log(`  Generated image : ${savedImage}`);
+  if (screenshotPath) console.log(`  Screenshot      : ${screenshotPath}`);
+  console.log('');
+
+  // Write a simple manifest so the caller knows exactly what was saved
+  fs.writeFileSync(
+    path.join(OUTPUT_DIR, 'manifest.json'),
+    JSON.stringify({ generatedImage: savedImage, screenshot: screenshotPath }, null, 2)
   );
 }
 
-/**
- * Extract all base64 data: or blob: href values from download anchor elements.
- * For blob URLs, we also try reading the blob contents via page.evaluate.
- */
-async function extractDownloadDataUrls(frame) {
-  const urls = [];
-
-  // Gather all <a> tags that look like download links
-  const anchors = await frame.$$('a[href], a[download], a:has-text("تحميل"), a:has-text("Download")');
-
-  for (const anchor of anchors) {
-    try {
-      const href = await anchor.evaluate(el => el.href || el.getAttribute('href') || '');
-
-      if (href.startsWith('data:')) {
-        urls.push(href);
-      } else if (href.startsWith('blob:')) {
-        // Read blob URL contents as base64 using a FileReader inside the page
-        const dataUrl = await frame.evaluate(async (blobUrl) => {
-          const response = await fetch(blobUrl);
-          const blob = await response.blob();
-          return new Promise((resolve, reject) => {
-            const reader = new FileReader();
-            reader.onloadend = () => resolve(reader.result);
-            reader.onerror   = reject;
-            reader.readAsDataURL(blob);
-          });
-        }, href);
-
-        if (dataUrl && dataUrl.startsWith('data:')) {
-          urls.push(dataUrl);
-        }
-      }
-    } catch (err) {
-      console.warn(`[extract] Skipped one anchor: ${err.message}`);
-    }
-  }
-
-  // Also search for <img> tags whose src is a data: or blob: URL (some apps embed the result)
-  if (urls.length === 0) {
-    console.warn('[extract] No download links found. Searching for result <img> tags…');
-    const resultImages = await frame.$$('img[src^="data:"], img[src^="blob:"]');
-
-    for (const img of resultImages) {
-      try {
-        const src = await img.evaluate(el => el.src || '');
-        if (src.startsWith('data:')) {
-          urls.push(src);
-        } else if (src.startsWith('blob:')) {
-          const dataUrl = await frame.evaluate(async (blobUrl) => {
-            const response = await fetch(blobUrl);
-            const blob = await response.blob();
-            return new Promise((resolve, reject) => {
-              const reader = new FileReader();
-              reader.onloadend = () => resolve(reader.result);
-              reader.onerror   = reject;
-              reader.readAsDataURL(blob);
-            });
-          }, src);
-
-          if (dataUrl && dataUrl.startsWith('data:')) urls.push(dataUrl);
-        }
-      } catch (err) {
-        console.warn(`[extract] Skipped one image: ${err.message}`);
-      }
-    }
-  }
-
-  return urls;
-}
-
-// ── Entry point ─────────────────────────────────────────────────────────────
-run().catch(err => {
-  console.error('\n[fatal]', err.message || err);
-  if (err.stack) console.error(err.stack);
+main().catch(err => {
+  console.error('\n[FATAL]', err.message);
+  console.error(err.stack);
   process.exit(1);
 });

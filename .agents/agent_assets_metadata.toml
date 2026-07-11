@@ -1,0 +1,14 @@
+uploads = []
+generated = []
+
+[[outputs]]
+id = "S4UTMhegotGRDRNC0a1vp"
+uri = "file://automation/output/gemini_flash_result_1.png"
+type = "image"
+title = "🎨 Generated Image — مدينة مستقبلية في الفضاء الخارجي"
+
+[[outputs]]
+id = "haY5WAq-jBmGjwsPse4gd"
+uri = "file://automation/output/execution_screenshot.png"
+type = "image"
+title = "📸 Execution Screenshot — Final Browser State"
