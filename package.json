@@ -4,7 +4,7 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "start": "npx tsx src/index.ts",
+    "start": "npx tsx artifacts/api-server/src/index.ts",
     "build": "npm run typecheck",
     "typecheck:libs": "tsc --build",
     "typecheck": "npm run typecheck:libs"
