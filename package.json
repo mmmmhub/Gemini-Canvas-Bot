@@ -3,14 +3,15 @@
   "version": "0.0.0",
   "license": "MIT",
   "type": "module",
+  "packageManager": "pnpm@8.15.5",
   "workspaces": [
     "artifacts/*"
   ],
   "scripts": {
     "start": "npx tsx artifacts/api-server/src/index.ts",
-    "build": "npm run typecheck",
+    "build": "pnpm run typecheck",
     "typecheck:libs": "tsc --build",
-    "typecheck": "npm run typecheck:libs"
+    "typecheck": "pnpm run typecheck:libs"
   },
   "private": true,
   "dependencies": {
