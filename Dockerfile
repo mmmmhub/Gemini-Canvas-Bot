@@ -1,18 +1,17 @@
-# استخدام صورة Playwright الرسمية المبنية على Ubuntu لتوفير جميع متطلبات المتصفح
+# 1. استخدام صورة Playwright لتوفير المتصفحات المطلوبة
 FROM mcr.microsoft.com/playwright:v1.40.0-jammy
 
-# إعداد مجلد العمل داخل حاوية Railway
+# 2. تحديد مسار العمل
 WORKDIR /app
 
-# نسخ ملفات الحزم أولاً لتسريع عملية البناء (Caching)
-COPY package*.json ./
+# 3. تثبيت pnpm عالمياً لحل أزمة الـ workspaces
+RUN npm install -g pnpm@8.15.5
 
-# تثبيت الاعتماديات
-RUN npm install
-
-# نسخ باقي ملفات المشروع
+# 4. نسخ جميع ملفات المشروع
 COPY . .
 
-# أمر تشغيل السيرفر
-CMD ["npm", "start"]
+# 5. تثبيت جميع الحزم (سيقوم pnpm تلقائياً بربط api-zod وغيرها)
+RUN pnpm install
 
+# 6. أمر تشغيل السيرفر النهائي
+CMD ["npx", "tsx", "artifacts/api-server/src/index.ts"]
