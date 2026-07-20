@@ -2,8 +2,9 @@
   "name": "workspace",
   "version": "0.0.0",
   "license": "MIT",
+  "type": "module",
   "scripts": {
-    "start": "node index.js",
+    "start": "node src/index.js",
     "build": "npm run typecheck",
     "typecheck:libs": "tsc --build",
     "typecheck": "npm run typecheck:libs"
