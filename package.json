@@ -3,6 +3,9 @@
   "version": "0.0.0",
   "license": "MIT",
   "type": "module",
+  "workspaces": [
+    "artifacts/*"
+  ],
   "scripts": {
     "start": "npx tsx artifacts/api-server/src/index.ts",
     "build": "npm run typecheck",
